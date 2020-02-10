@@ -17,12 +17,12 @@ from detectron2.modeling.backbone import ESNACArchitecture
 from ESNAC.architecture import replace_resnet
 import ESNAC.options as opt
 
-def preparation():
+def preparation(config_file, model_weights, tr_batch_size, save_path, idx):
     print('Loading cfg')
     args = [
-        '--config-file', opt.config_file,
-        'MODEL.WEIGHTS', opt.model_weights,
-        'SOLVER.IMS_PER_BATCH', str(opt.tr_batch_size),
+        '--config-file', config_file,
+        'MODEL.WEIGHTS', model_weights,
+        'SOLVER.IMS_PER_BATCH', str(tr_batch_size),
     ]
     args = default_argument_parser().parse_args(args)
     cfg = get_cfg()
@@ -34,7 +34,7 @@ def preparation():
     print('Loading data')
     train_loader = build_detection_train_loader(cfg)
     val_loader = build_detection_test_loader(cfg, cfg.DATASETS.TEST[0])
-    val_evaluator = COCOEvaluator(cfg.DATASETS.TEST[0], cfg, False, os.path.join(opt.savedir, 'inference_temp'))
+    val_evaluator = COCOEvaluator(cfg.DATASETS.TEST[0], cfg, False, os.path.join(save_path, 'inference_%d' % (idx)))
 
     print('Loading model')
     fasterrcnn = build_model(cfg)
@@ -43,10 +43,10 @@ def preparation():
 
     return train_loader, val_loader, val_evaluator, fasterrcnn
 
-def evaluate_sub(save_path, idx,
+def evaluate_sub(config_file, model_weights, tr_batch_size, save_path, idx,
                  iterations=opt.tr_iterations, lr=1e-4, weight_decay=5e-4):
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(idx)
-    train_loader, val_loader, val_evaluator, teacher = preparation()
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(idx + 2)
+    train_loader, val_loader, val_evaluator, teacher = preparation(config_file, model_weights, tr_batch_size, save_path, idx)
     arch = ESNACArchitecture()
     arch.load_state_dict(torch.load(os.path.join(save_path, 'student_%d_state.pth' % (idx))))
     student = replace_resnet(teacher, arch).to(opt.device)
@@ -57,6 +57,7 @@ def evaluate_sub(save_path, idx,
     optimizer = optim.Adam(student.backbone.parameters(), lr=lr, weight_decay=weight_decay)
 
     for data, iteration in zip(train_loader, range(iterations)):
+        iteration += 1
         images = preprocess(data).tensor
 
         with torch.no_grad():
@@ -71,8 +72,8 @@ def evaluate_sub(save_path, idx,
         optimizer.step()
         optimizer.zero_grad()
 
-        if opt.writer:
-            opt.writer.add_scalar('step_%d/sample_%d_loss' % (opt.i, idx), loss.item(), iteration)
+        if iteration % 200 == 0:
+            print(idx, iteration, loss.item())
 
     torch.cuda.empty_cache()
     results = inference_on_dataset(student, val_loader, val_evaluator)
@@ -89,7 +90,7 @@ def evaluate(students):
 
     for idx, student in enumerate(students):
         torch.save(student.backbone.bottom_up.state_dict(), os.path.join(save_path, 'student_%d_state.pth' % (idx)))
-        p = mp.Process(target=evaluate_sub, args=(save_path, idx))
+        p = mp.Process(target=evaluate_sub, args=(opt.config_file, opt.model_weights, opt.tr_batch_size, save_path, idx))
         p.start()
         processes.append(p)
     for p in processes:

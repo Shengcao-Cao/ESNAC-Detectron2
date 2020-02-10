@@ -31,7 +31,7 @@ ar_p3 = [0.003, 0.005, 0.01, 0.03, 0.05]                    # for adding skip co
 
 # compression.py
 # hyper-params for multiple kernel strategy (see 3.3 & 6.3)
-co_step_n = 40                                              # number of search steps
+co_step_n = 50                                              # number of search steps
 co_kernel_n = 2                                             # number of kernels, as well as evaluated architectures in each search step
 co_best_n = 4                                               # number of saved best architectures during search, all of which will be fully trained
 # hyper-params for stopping criterion of kernel optimization
