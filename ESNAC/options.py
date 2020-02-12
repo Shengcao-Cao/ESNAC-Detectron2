@@ -4,6 +4,8 @@ import torch
 config_file = 'configs/COCO-Detection/faster_rcnn_R_50_FPN_3x.yaml'
 model_weights = 'models/model_final_280758.pkl'
 device = torch.device('cuda')                               # used device, cuda only for now
+n_gpus = 2
+seed = 0
 savedir = None                                              # save directory
 writer = None                                               # record writer for tensorboardX
 i = 0                                                       # sample index in search
@@ -53,5 +55,6 @@ ke_weight_decay = 5e-4
 
 # training.py
 tr_target_acc = 40.22
-tr_iterations = 10000
-tr_batch_size = 4
+tr_iterations = 100
+tr_ims_per_batch = 4
+tr_dist_url = 'tcp://127.0.0.1:49062'

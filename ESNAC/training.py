@@ -4,101 +4,77 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import torch.distributed as dist
 import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
 
-from detectron2.checkpoint import DetectionCheckpointer
-from detectron2.config import get_cfg
-from detectron2.data import build_detection_test_loader, build_detection_train_loader
-from detectron2.engine import default_argument_parser, default_setup
-from detectron2.evaluation import COCOEvaluator, inference_on_dataset
-from detectron2.modeling import build_model
+from detectron2.evaluation import inference_on_dataset
 from detectron2.modeling.backbone import ESNACArchitecture
 
 from ESNAC.architecture import replace_resnet
+from ESNAC.utils import seed_everything, load_model, load_train, load_val, to_cuda
 import ESNAC.options as opt
 
-def preparation(config_file, model_weights, tr_batch_size, save_path, idx):
-    print('Loading cfg')
-    args = [
-        '--config-file', config_file,
-        'MODEL.WEIGHTS', model_weights,
-        'SOLVER.IMS_PER_BATCH', str(tr_batch_size),
-    ]
-    args = default_argument_parser().parse_args(args)
-    cfg = get_cfg()
-    cfg.merge_from_file(args.config_file)
-    cfg.merge_from_list(args.opts)
-    cfg.freeze()
-    default_setup(cfg, args)
+def train_worker(rank, world_size, dist_url, seed, student_path, config_file, model_weights, ims_per_batch, iterations, lr=1e-4, weight_decay=5e-4):
+    torch.cuda.set_device(rank)
+    seed_everything(seed)
+    dist.init_process_group(backend='NCCL', init_method=dist_url, world_size=world_size, rank=rank)
 
-    print('Loading data')
-    train_loader = build_detection_train_loader(cfg)
-    val_loader = build_detection_test_loader(cfg, cfg.DATASETS.TEST[0])
-    val_evaluator = COCOEvaluator(cfg.DATASETS.TEST[0], cfg, False, os.path.join(save_path, 'inference_%d' % (idx)))
-
-    print('Loading model')
-    fasterrcnn = build_model(cfg)
-    checkpointer = DetectionCheckpointer(fasterrcnn, cfg.OUTPUT_DIR)
-    checkpointer.resume_or_load(cfg.MODEL.WEIGHTS, resume=True)
-
-    return train_loader, val_loader, val_evaluator, fasterrcnn
-
-def evaluate_sub(config_file, model_weights, tr_batch_size, save_path, idx,
-                 iterations=opt.tr_iterations, lr=1e-4, weight_decay=5e-4):
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(idx + 2)
-    train_loader, val_loader, val_evaluator, teacher = preparation(config_file, model_weights, tr_batch_size, save_path, idx)
-    arch = ESNACArchitecture()
-    arch.load_state_dict(torch.load(os.path.join(save_path, 'student_%d_state.pth' % (idx))))
-    student = replace_resnet(teacher, arch).to(opt.device)
-    teacher.train()
-    student.train()
+    teacher = load_model(config_file, model_weights, 'cuda')
+    student_arch = torch.load(student_path)
+    student = replace_resnet(teacher, student_arch).to('cuda')
+    teacher_backbone = DDP(teacher.backbone, device_ids=[rank], find_unused_parameters=True)
+    student_backbone = DDP(student.backbone, device_ids=[rank], find_unused_parameters=True)
+    teacher_backbone.train()
+    student_backbone.train()
     preprocess = teacher.preprocess_image
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(student.backbone.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer = optim.Adam(student_backbone.parameters(), lr=lr, weight_decay=weight_decay)
+    train_loader = load_train(config_file, ims_per_batch)
 
     for data, iteration in zip(train_loader, range(iterations)):
         iteration += 1
         images = preprocess(data).tensor
 
         with torch.no_grad():
-            teacher_features = teacher.backbone(images)
+            teacher_features = teacher_backbone(images)
 
-        student_features = student.backbone(images)
+        student_features = student_backbone(images)
+        optimizer.zero_grad()
         loss = sum([criterion(teacher_features[key], student_features[key]) for key in teacher_features])
         if not torch.isfinite(loss):
             print('WARNING: non-finite loss, ending training')
             return
         loss.backward()
         optimizer.step()
-        optimizer.zero_grad()
 
-        if iteration % 200 == 0:
-            print(idx, iteration, loss.item())
+    dist.barrier()
+    if rank == 0:
+        torch.save(student.state_dict(), student_path)
+        dist.destroy_process_group()
 
-    torch.cuda.empty_cache()
+def evaluate(student):
+    student_path = os.path.join(opt.savedir, 'temp')
+    if not os.path.exists(student_path):
+        os.makedirs(student_path)
+    student_path = os.path.join(student_path, 'student.pth')
+    torch.save(student.backbone.bottom_up, student_path)
+
+    mp.spawn(train_worker, nprocs=opt.n_gpus,
+        args=(
+            opt.n_gpus,
+            opt.tr_dist_url,
+            opt.seed,
+            student_path,
+            opt.config_file,
+            opt.model_weights,
+            opt.tr_ims_per_batch,
+            opt.tr_iterations,
+        ))
+
+    student.load_state_dict(torch.load(student_path))
+    student = to_cuda(student)
+    val_loader, val_evaluator = load_val(opt.config_file, os.path.join(opt.savedir, 'temp', 'inference'))
     results = inference_on_dataset(student, val_loader, val_evaluator)
-    state_dict = student.state_dict()
-    state_dict['acc'] = results['bbox']['AP']
-    torch.save(state_dict, os.path.join(save_path, 'student_%d_state.pth' % (idx)))
-
-def evaluate(students):
-    n = len(students)
-    processes = []
-    save_path = os.path.join(opt.savedir, 'temp')
-    if not os.path.exists(save_path):
-        os.makedirs(save_path)
-
-    for idx, student in enumerate(students):
-        torch.save(student.backbone.bottom_up.state_dict(), os.path.join(save_path, 'student_%d_state.pth' % (idx)))
-        p = mp.Process(target=evaluate_sub, args=(opt.config_file, opt.model_weights, opt.tr_batch_size, save_path, idx))
-        p.start()
-        processes.append(p)
-    for p in processes:
-        p.join()
-
-    for idx in range(n):
-        state_dict = torch.load(os.path.join(save_path, 'student_%d_state.pth' % (idx)))
-        acc = state_dict.pop('acc')
-        students[idx].load_state_dict(state_dict, strict=False)
-        students[idx].acc = acc
-    return students
+    student.acc = results['bbox']['AP']
+    return student

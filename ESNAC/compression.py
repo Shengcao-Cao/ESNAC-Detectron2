@@ -8,11 +8,6 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 import torch.multiprocessing as mp
 
-from detectron2.checkpoint import DetectionCheckpointer
-from detectron2.config import get_cfg
-from detectron2.engine import default_argument_parser, default_setup
-from detectron2.evaluation import COCOEvaluator, inference_on_dataset
-from detectron2.modeling import build_model
 from detectron2.modeling.backbone import ESNACArchitecture
 
 from ESNAC.acquisition import random_search
@@ -21,33 +16,8 @@ from ESNAC.graph import get_graph_resnet
 from ESNAC.kernel import Kernel
 from ESNAC.record import Record
 from ESNAC.training import evaluate
-from ESNAC.utils import seed_everything, save_model, param_n
+from ESNAC.utils import seed_everything, save_model, param_n, load_model
 import ESNAC.options as opt
-
-def get_model():
-    print('Loading cfg')
-    args = [
-        '--config-file', opt.config_file,
-        'MODEL.WEIGHTS', opt.model_weights,
-        'MODEL.DEVICE', 'cpu',
-    ]
-    args = default_argument_parser().parse_args(args)
-    cfg = get_cfg()
-    cfg.merge_from_file(args.config_file)
-    cfg.merge_from_list(args.opts)
-    cfg.freeze()
-    default_setup(cfg, args)
-
-    print('Loading model')
-    fasterrcnn = build_model(cfg)
-    checkpointer = DetectionCheckpointer(fasterrcnn, cfg.OUTPUT_DIR)
-    checkpointer.resume_or_load(cfg.MODEL.WEIGHTS, resume=True)
-    resnet = fasterrcnn.backbone.bottom_up
-    resnet = ESNACArchitecture(*(get_graph_resnet(resnet)))
-    init_arch_rep(resnet)
-    init_arch_groups(resnet)
-
-    return fasterrcnn, resnet
 
 def new_kernels(arch, record, kernel_n, alpha=opt.co_alpha,
                 beta=opt.co_beta, gamma=opt.co_gamma):
@@ -97,7 +67,7 @@ def next_samples(teacher, backbone, kernels, kernel_n):
 def reward(teacher, students, target_acc=opt.tr_target_acc):
     start_time = time.time()
     n = len(students)
-    students = evaluate(students)
+    students = [evaluate(student) for student in students]
     rs = []
     for j in range(n):
         acc = students[j].acc
@@ -140,7 +110,7 @@ def compression(teacher, backbone,
         archs_best = archs_best[:best_n]
         ckpt = {
             'step': i,
-            'archs_best': [arch.state_dict() for arch in archs_best],
+            'archs_best': [(arch.backbone.bottom_up, arch.state_dict()) for arch in archs_best],
             'record': record
         }
         save_model(ckpt, os.path.join(opt.savedir, 'ckpt.pth'))
@@ -152,6 +122,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--config-file', type=str, default='configs/COCO-Detection/faster_rcnn_R_50_FPN_3x.yaml', help='path to model config file')
     parser.add_argument('--model-weights', type=str, default='models/model_final_280758.pkl', help='pretrained model weights')
+    parser.add_argument('--n-gpus', type=int, default=2, help='number of GPUs used for training')
     parser.add_argument('--ims-per-batch', type=str, default='4', help='training batch size')
     parser.add_argument('--name', type=str, help='name of experiment')
 
@@ -162,7 +133,8 @@ if __name__ == '__main__':
 
     opt.config_file = args.config_file
     opt.model_weights = args.model_weights
-    opt.tr_batch_size = args.ims_per_batch
+    opt.n_gpus = args.n_gpus
+    opt.tr_ims_per_batch = args.ims_per_batch
     opt.savedir = 'save/%s' % (args.name)
     opt.writer = SummaryWriter('runs/%s' % (args.name))
 
@@ -176,8 +148,13 @@ if __name__ == '__main__':
         archs_best = []
         record = Record()
 
+    fasterrcnn = load_model(opt.config_file, opt.model_weights, 'cpu')
+    resnet = fasterrcnn.backbone.bottom_up
+    resnet = ESNACArchitecture(*(get_graph_resnet(resnet)))
+    init_arch_rep(resnet)
+    init_arch_groups(resnet)
+
     print ('Compression %s starts. Saved checkpoint at save/%s. Log file at runs/%s.' %
         (args.name, args.name, args.name))
 
-    fasterrcnn, resnet = get_model()
     compression(fasterrcnn, resnet, record, archs_best, step_start)
