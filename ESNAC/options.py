@@ -34,7 +34,7 @@ ar_p3 = [0.003, 0.005, 0.01, 0.03, 0.05]                    # for adding skip co
 # compression.py
 # hyper-params for multiple kernel strategy (see 3.3 & 6.3)
 co_step_n = 50                                              # number of search steps
-co_kernel_n = 2                                             # number of kernels, as well as evaluated architectures in each search step
+co_kernel_n = 4                                             # number of kernels, as well as evaluated architectures in each search step
 co_best_n = 4                                               # number of saved best architectures during search, all of which will be fully trained
 # hyper-params for stopping criterion of kernel optimization
 co_alpha = 0.5
@@ -55,6 +55,6 @@ ke_weight_decay = 5e-4
 
 # training.py
 tr_target_acc = 40.22
-tr_iterations = 100
+tr_iterations = 4000
 tr_ims_per_batch = 4
 tr_dist_url = 'tcp://127.0.0.1:49062'

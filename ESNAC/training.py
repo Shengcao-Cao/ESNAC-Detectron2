@@ -1,5 +1,6 @@
 import copy
 import os
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -43,7 +44,7 @@ def train_worker(rank, world_size, dist_url, seed, student_path, config_file, mo
         optimizer.zero_grad()
         loss = sum([criterion(teacher_features[key], student_features[key]) for key in teacher_features])
         if not torch.isfinite(loss):
-            print('WARNING: non-finite loss, ending training')
+            print('WARNING: non-finite loss, ending training', flush=True)
             return
         loss.backward()
         optimizer.step()
@@ -54,6 +55,7 @@ def train_worker(rank, world_size, dist_url, seed, student_path, config_file, mo
         dist.destroy_process_group()
 
 def evaluate(student):
+    start_time = time.time()
     student_path = os.path.join(opt.savedir, 'temp')
     if not os.path.exists(student_path):
         os.makedirs(student_path)
@@ -72,9 +74,18 @@ def evaluate(student):
             opt.tr_iterations,
         ))
 
+    end_time = time.time()
+    print('Training time', end_time - start_time)
+    start_time = end_time
+
     student.load_state_dict(torch.load(student_path))
     student = to_cuda(student)
     val_loader, val_evaluator = load_val(opt.config_file, os.path.join(opt.savedir, 'temp', 'inference'))
     results = inference_on_dataset(student, val_loader, val_evaluator)
     student.acc = results['bbox']['AP']
+
+    end_time = time.time()
+    print('Test time', end_time - start_time)
+    start_time = end_time
+
     return student

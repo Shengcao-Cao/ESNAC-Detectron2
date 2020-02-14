@@ -114,6 +114,7 @@ def compression(teacher, backbone,
             'record': record
         }
         save_model(ckpt, os.path.join(opt.savedir, 'ckpt.pth'))
+        print('Step time', time.time() - start_time)
         opt.writer.add_scalar('compression/step_time',
                               time.time() - start_time, i)
 
